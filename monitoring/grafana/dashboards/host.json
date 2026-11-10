@@ -1045,7 +1045,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (interface) (rate(container_network_receive_errors_total{id=\"/\", interface!~\"lo|veth.*\"}[$__rate_interval]) + rate(container_network_transmit_errors_total{id=\"/\", interface!~\"lo|veth.*\"}[$__rate_interval]))",
+          "expr": "sum by (interface) (rate(container_network_receive_errors_total{id=\"/\", interface!~\"lo|veth.*|br-.*|docker.*\"}[$__rate_interval]) + rate(container_network_transmit_errors_total{id=\"/\", interface!~\"lo|veth.*|br-.*|docker.*\"}[$__rate_interval]))",
           "refId": "A",
           "legendFormat": "{{interface}} errors"
         },
@@ -1054,7 +1054,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (interface) (rate(container_network_receive_packets_dropped_total{id=\"/\", interface!~\"lo|veth.*\"}[$__rate_interval]) + rate(container_network_transmit_packets_dropped_total{id=\"/\", interface!~\"lo|veth.*\"}[$__rate_interval]))",
+          "expr": "sum by (interface) (rate(container_network_receive_packets_dropped_total{id=\"/\", interface!~\"lo|veth.*|br-.*|docker.*\"}[$__rate_interval]) + rate(container_network_transmit_packets_dropped_total{id=\"/\", interface!~\"lo|veth.*|br-.*|docker.*\"}[$__rate_interval]))",
           "refId": "B",
           "legendFormat": "{{interface}} drops"
         }
