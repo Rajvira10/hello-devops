@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+
+# Images are side-loaded into kind with `kind load docker-image`.
+images:
+  - name: hello-devops
+    newName: hello-devops
+    newTag: "0.1.0"
+
+configMapGenerator:
+  - name: hello-devops-config
+    behavior: merge
+    literals:
+      - APP_ENV=kind

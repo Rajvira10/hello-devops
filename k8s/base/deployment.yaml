@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-devops
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  # A new pod must stay Ready this long before it counts as available —
+  # catches pods that pass one probe and then crash.
+  minReadySeconds: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1        # add one new pod at a time…
+      maxUnavailable: 0  # …and never drop below the desired replica count.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hello-devops
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hello-devops
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: hello-devops
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # Spread replicas across nodes so one node failure can't take out both.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: hello-devops
+      containers:
+        - name: app
+          image: hello-devops   # tag set by the overlay / `kubectl set image`
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: hello-devops-config
+            - secretRef:
+                name: hello-devops-secrets
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+          # Startup gives a slow start time before liveness kicks in.
+          startupProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 2
+            failureThreshold: 15
+          # Readiness: pull out of the Service quickly (10s) — also how the
+          # app signals "draining" after SIGTERM.
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          # Liveness: restart only after ~30s of failures, so a brief stall
+          # (GC pause, CPU throttling) doesn't cause a restart loop.
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
