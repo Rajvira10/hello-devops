@@ -1,0 +1,226 @@
+# Quality and security gates. Runs on every pull request, and is reused by
+# the CD workflow so main is re-verified before anything is pushed.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOLANGCI_LINT_VERSION: v2.15.0
+  SHELLCHECK_IMAGE: koalaman/shellcheck:v0.11.0
+  TERRAFORM_IMAGE: hashicorp/terraform:1.17.1
+  TFLINT_IMAGE: ghcr.io/terraform-linters/tflint:v0.66.0
+  MIN_COVERAGE: "80"
+
+jobs:
+  # ------------------------------------------------------------------ app --
+  app:
+    name: Go lint, test & coverage
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: app/go.mod
+          cache-dependency-path: app/go.sum
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          working-directory: app
+
+      - name: Unit tests (race detector + coverage)
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: Coverage report and gate
+        run: |
+          go tool cover -html=coverage.out -o coverage.html
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%","",$3); print $3}')
+          {
+            echo "### Test coverage: ${total}%"
+            echo '```'
+            go tool cover -func=coverage.out
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          awk -v t="$total" -v m="$MIN_COVERAGE" 'BEGIN { if (t+0 < m+0) { printf "coverage %.1f%% is below %s%%\n", t, m; exit 1 } }'
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: coverage
+          path: |
+            app/coverage.out
+            app/coverage.html
+          retention-days: 14
+
+  # ---------------------------------------------------- dockerfile + shell --
+  lint:
+    name: Dockerfile & shell lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: hadolint
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+
+      - name: shellcheck
+        run: |
+          docker run --rm -v "$PWD:/mnt:ro" -w /mnt "$SHELLCHECK_IMAGE" \
+            --severity=style scripts/*.sh
+
+  # ------------------------------------------------------- config / IaC --
+  validate:
+    name: Validate IaC & configs
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: terraform fmt
+        run: docker run --rm -v "$PWD/terraform:/tf" -w /tf "$TERRAFORM_IMAGE" fmt -check -recursive -diff
+
+      - name: terraform validate
+        run: |
+          for d in bootstrap envs modules/app_host; do
+            echo "::group::$d"
+            docker run --rm -v "$PWD/terraform:/tf" -w "/tf/$d" "$TERRAFORM_IMAGE" init -backend=false -input=false
+            docker run --rm -v "$PWD/terraform:/tf" -w "/tf/$d" "$TERRAFORM_IMAGE" validate
+            echo "::endgroup::"
+          done
+
+      - name: tflint
+        run: |
+          docker run --rm -e GITHUB_TOKEN -v "$PWD/terraform:/data" -w /data --entrypoint sh "$TFLINT_IMAGE" \
+            -c 'tflint --init --config /data/.tflint.hcl && tflint --recursive --config /data/.tflint.hcl'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Render Terraform templates and shellcheck them
+        run: |
+          mkdir -p /tmp/render
+          tpl() { docker run --rm -i -v "$PWD/terraform:/tf" -w /tf "$TERRAFORM_IMAGE" console | sed '1d;$d'; }
+          echo 'templatefile("modules/app_host/templates/deploy.sh.tftpl", {region="r", registry="x", repository_url="x/y", log_group="/g", environment="staging", log_level="info", memory_mb=256, container_name="c", ssm_param_path="/p"})' | tpl > /tmp/render/deploy.sh
+          echo 'templatefile("modules/app_host/templates/user_data.sh.tftpl", {deploy_script="", image_tag="0.1.0"})' | tpl > /tmp/render/user_data.sh
+          docker run --rm -v /tmp/render:/mnt:ro -w /mnt "$SHELLCHECK_IMAGE" deploy.sh user_data.sh
+
+      - name: Kubernetes manifests (kubeconform, strict)
+        run: |
+          kubectl kustomize k8s/overlays/kind > /tmp/k8s.yaml
+          docker run --rm -v /tmp:/data ghcr.io/yannh/kubeconform:v0.7.0 \
+            -strict -summary -kubernetes-version 1.37.0 /data/k8s.yaml
+
+      - name: Prometheus config and alert rules (promtool)
+        run: |
+          docker run --rm -v "$PWD/monitoring/prometheus:/etc/prometheus:ro" --entrypoint promtool \
+            prom/prometheus:v3.16.0 check config /etc/prometheus/prometheus.yml
+
+      - name: Alert rule unit tests (promtool test rules)
+        run: |
+          docker run --rm -v "$PWD/monitoring/prometheus:/p:ro" -w /p/tests --entrypoint promtool \
+            prom/prometheus:v3.16.0 test rules alerts_test.yml
+
+      - name: Alertmanager config (amtool)
+        run: |
+          mkdir -p /tmp/am && echo 'https://discord.invalid/webhook' > /tmp/am/discord_webhook_url
+          docker run --rm -v "$PWD/monitoring/alertmanager:/etc/alertmanager:ro" -v /tmp/am:/run/secrets-tmp:ro \
+            --entrypoint amtool prom/alertmanager:v0.35.0 check-config /etc/alertmanager/alertmanager.yml
+
+      - name: Alloy config syntax
+        run: |
+          docker run --rm -v "$PWD/monitoring/alloy:/etc/alloy:ro" grafana/alloy:v1.21.3 fmt /etc/alloy/config.alloy > /dev/null
+
+      - name: Grafana dashboards are valid JSON
+        run: for f in monitoring/grafana/dashboards/*.json; do jq -e '.uid and .panels' "$f" > /dev/null; done
+
+      - name: docker compose config
+        run: cp .env.example .env && docker compose config --quiet
+
+      - name: Trivy misconfiguration scan (Terraform, k8s, Dockerfile)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+  # ------------------------------------------------------- image + scan --
+  image:
+    name: Build image & vulnerability scan
+    runs-on: ubuntu-24.04
+    needs: [app, lint]
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to the Security tab
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build (linux/amd64, loaded locally)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          push: false
+          tags: hello-devops:ci-${{ github.sha }}
+          build-args: |
+            VERSION=ci-${{ github.sha }}
+            REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=pr-amd64
+          cache-to: type=gha,scope=pr-amd64,mode=max
+
+      - name: Trivy — fail on CRITICAL vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: hello-devops:ci-${{ github.sha }}
+          severity: CRITICAL
+          exit-code: "1"
+          ignore-unfixed: false
+          format: table
+
+      - name: Trivy — full report (SARIF, does not gate)
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: hello-devops:ci-${{ github.sha }}
+          format: sarif
+          output: trivy-image.sarif
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: "0"
+          skip-setup-trivy: true
+
+      - name: Upload SARIF
+        # Fork PRs get a read-only token and cannot upload.
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+      - name: Container smoke test
+        run: |
+          docker run -d --name smoke -p 8080:8080 --read-only --cap-drop ALL hello-devops:ci-${{ github.sha }}
+          for _ in $(seq 1 20); do
+            if curl -fsS localhost:8080/health; then break; fi; sleep 1
+          done
+          curl -fsS localhost:8080/ | jq -e '.message == "Hello from DevOps Task!" and .status == "running"'
+          curl -fsS localhost:8080/metrics | grep -q '^http_requests_total'
+          docker stop -t 20 smoke && test "$(docker inspect -f '{{.State.ExitCode}}' smoke)" = 0
+          docker image ls hello-devops --format 'Image size: {{.Size}}' >> "$GITHUB_STEP_SUMMARY"
