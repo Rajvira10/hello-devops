@@ -1,0 +1,10 @@
+# Only app/ and the Dockerfile are needed in the build context.
+*
+!app/
+!Dockerfile
+
+# ...and nothing from app/ that isn't source.
+app/bin/
+app/**/*_test.go
+app/coverage.*
+app/.golangci.yml
