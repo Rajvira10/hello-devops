@@ -1,0 +1,58 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    environment: local
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  # The application. Static target is fine for a single compose service; on
+  # EC2/EKS this becomes EC2 / Kubernetes service discovery.
+  - job_name: app
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["app:8080"]
+        labels:
+          service: hello-devops
+
+  - job_name: node-exporter
+    static_configs:
+      - targets: ["node-exporter:9100"]
+    relabel_configs:
+      # Show a stable host name instead of the container's address.
+      - target_label: instance
+        replacement: docker-host
+
+  - job_name: cadvisor
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["cadvisor:8080"]
+    metric_relabel_configs:
+      # Drop per-interface network series for veth* pairs — high churn, low value.
+      - source_labels: [__name__, interface]
+        regex: "container_network_.+;veth.+"
+        action: drop
+
+  # The monitoring stack watches itself.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["alertmanager:9093"]
+  - job_name: loki
+    static_configs:
+      - targets: ["loki:3100"]
+  - job_name: alloy
+    static_configs:
+      - targets: ["alloy:12345"]
+  - job_name: grafana
+    static_configs:
+      - targets: ["grafana:3000"]

@@ -1,0 +1,107 @@
+# Thresholds and `for` durations are explained in README.md → "Alerting rules".
+groups:
+  - name: application
+    rules:
+      - alert: AppInstanceDown
+        expr: up{job="app"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "hello-devops instance {{ $labels.instance }} is down"
+          description: "Prometheus has failed to scrape {{ $labels.instance }} for over 1 minute."
+          runbook: "docker compose ps app; docker compose logs --tail=100 app"
+
+      - alert: AppHighErrorRate
+        # Ratio of 5xx to all requests, ignoring near-idle periods where a
+        # single failed request would be a huge percentage.
+        expr: |
+          (
+            sum(rate(http_request_errors_total{job="app"}[5m]))
+              /
+            sum(rate(http_requests_total{job="app"}[5m]))
+          ) > 0.05
+          and
+          sum(rate(http_requests_total{job="app"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "hello-devops 5xx error rate above 5%"
+          description: "{{ $value | humanizePercentage }} of requests are failing (5m window)."
+          runbook: "Open the Application dashboard; filter the logs panel by level=error."
+
+      - alert: AppHighLatencyP95
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(http_request_duration_seconds_bucket{job="app", route!="/metrics"}[5m]))
+          ) > 0.5
+          and
+          sum(rate(http_requests_total{job="app"}[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "hello-devops p95 latency above 500ms"
+          description: "p95 latency is {{ $value | humanizeDuration }} over the last 5 minutes."
+
+  - name: host
+    rules:
+      - alert: HostDiskUsageHigh
+        expr: |
+          (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) * 100 > 80
+          and node_filesystem_readonly == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk {{ $labels.mountpoint }} is {{ $value | printf \"%.0f\" }}% full"
+          description: "Filesystem {{ $labels.mountpoint }} ({{ $labels.device }}) has been above 80% for 15 minutes."
+
+      - alert: HostDiskUsageCritical
+        expr: |
+          (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) * 100 > 90
+          and node_filesystem_readonly == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disk {{ $labels.mountpoint }} is {{ $value | printf \"%.0f\" }}% full"
+          description: "Filesystem {{ $labels.mountpoint }} is above 90%; writes may start failing soon."
+
+      - alert: HostHighCpuUsage
+        expr: 100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) > 90
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host CPU above 90% for 15 minutes"
+          description: "CPU usage on {{ $labels.instance }} is {{ $value | printf \"%.0f\" }}%."
+
+  - name: containers
+    rules:
+      - alert: ContainerMemoryNearLimit
+        # Only containers that actually have a limit (limit > 0).
+        expr: |
+          (
+            container_memory_working_set_bytes{name!=""}
+              /
+            (container_spec_memory_limit_bytes{name!=""} > 0)
+          ) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container {{ $labels.name }} is using {{ $value | humanizePercentage }} of its memory limit"
+          description: "Working-set memory has been above 90% of the limit for 5 minutes; an OOM kill is likely."
+
+  - name: monitoring
+    rules:
+      - alert: ScrapeTargetDown
+        expr: up{job!="app"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Monitoring target {{ $labels.job }} is down"
+          description: "{{ $labels.job }} ({{ $labels.instance }}) has been unreachable for 5 minutes; dashboards may have gaps."
