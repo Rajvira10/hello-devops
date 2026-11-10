@@ -1,0 +1,24 @@
+# Build / test output
+/app/bin/
+coverage.out
+coverage.html
+
+# Local env and secrets — never commit
+.env
+*.env
+!*.env.example
+k8s/overlays/*/secrets.env
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+.terraform.lock.hcl.bak
+
+# Health script output
+health_log.txt*
+
+# Local tool binaries
+/.tools/
