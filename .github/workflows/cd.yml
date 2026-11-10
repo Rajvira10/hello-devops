@@ -33,9 +33,23 @@ jobs:
       contents: read
       security-events: write
 
+  # Until the AWS side exists (terraform/bootstrap + envs) and the variables
+  # below are set, the release jobs are skipped instead of failing.
+  not-configured:
+    name: Release skipped (AWS not configured)
+    needs: ci
+    if: vars.AWS_PUSH_ROLE_ARN == ''
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          msg="AWS_PUSH_ROLE_ARN is not set — skipping image push and deploys. See README → CI/CD → Required configuration."
+          echo "::notice::$msg"
+          echo "### ⏭️ $msg" >> "$GITHUB_STEP_SUMMARY"
+
   build:
     name: Build, scan, push & sign
     needs: ci
+    if: vars.AWS_PUSH_ROLE_ARN != ''
     runs-on: ubuntu-24.04
     permissions:
       contents: write   # push the release git tag
