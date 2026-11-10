@@ -181,9 +181,12 @@ Without make: `cd app && go test -race -cover ./...` (Go 1.27+).
 |---|---|
 | `internal/server` (handlers, middleware, metrics) | 100 % |
 | `internal/config` | 94 % |
+| `cmd/server` (startup, graceful shutdown, healthcheck subcommand) | 83 % |
+| **Total** (CI gate: 80 %) | **93 %** |
 
 The tests cover every endpoint, the 503-while-draining behaviour, metric names/labels, the bounded `route` label,
-`/debug/error` auth (404 / 403 / 500), the JSON log format, and config parsing and validation.
+`/debug/error` auth (404 / 403 / 500), the JSON log format, config parsing and validation, and an end-to-end
+start → serve → cancel (SIGTERM) → drain → clean exit of the real server, plus the `healthcheck` subcommand.
 
 **Alert rules have their own unit tests**: `monitoring/prometheus/tests/alerts_test.yml`, run with
 `promtool test rules`. They check that each alert fires only after its `for` duration and respects its thresholds,
@@ -563,6 +566,8 @@ flowchart LR
 - **Deploy** via **SSM Run Command**: no SSH, no open port 22, no SSH keys to manage. See
   [rollback strategy](#deployment--rollback-strategy) for the smoke test and rollback.
 - `concurrency: cd-main` with `cancel-in-progress: false`, so a release is never interrupted halfway; the next one queues.
+- If `AWS_PUSH_ROLE_ARN` isn't set yet, the CI gates still run and the release jobs are **skipped with a
+  notice** instead of failing. A fresh fork stays green until AWS is wired up.
 
 ### Required configuration (no secrets)
 
