@@ -830,6 +830,7 @@ What I ran and verified locally, and what still needs an AWS account or a GitHub
 | promtool rule unit tests, promtool/amtool config checks, alloy fmt, kubeconform | ✅ pass |
 | kind deploy, ingress, HPA metrics, restricted PSS, rolling update + `rollout undo` with 0 failed requests | ✅ verified; output above |
 | Terraform fmt / validate / tflint / Trivy config; rendered user-data + deploy script shellcheck | ✅ pass |
+| CI workflow on GitHub-hosted runners | ⏳ **not run.** GitHub refused to start the jobs ("account is locked due to a billing issue"), an account-level problem unrelated to the code. Every CI step was run locally with the same tool versions and passes |
 | `terraform plan` / `apply` against AWS | ⏳ **not yet run.** Needs AWS credentials. Commands are [above](#running-it) |
 | CD run: push to ECR, SSM deploy, smoke test, rollback on EC2 | ⏳ **not yet run.** Needs the AWS resources plus the GitHub variables listed above |
 
