@@ -1,0 +1,22 @@
+#!/bin/bash
+# First-boot bootstrap: install Docker, install the deploy helper, start the app.
+set -euxo pipefail
+exec > >(tee -a /var/log/hello-devops-bootstrap.log) 2>&1
+
+dnf install -y --setopt=install_weak_deps=False docker
+systemctl enable --now docker
+
+# Rotate local container logs too (awslogs is the primary sink).
+mkdir -p /etc/docker
+cat > /etc/docker/daemon.json <<'JSON'
+{ "live-restore": true, "no-new-privileges": true }
+JSON
+systemctl restart docker
+
+cat > /usr/local/bin/hello-devops-deploy <<'DEPLOY_EOF'
+${deploy_script}
+DEPLOY_EOF
+chmod 0750 /usr/local/bin/hello-devops-deploy
+
+# The initial image may not exist yet on a brand-new setup; CI deploys later.
+/usr/local/bin/hello-devops-deploy "${image_tag}" || echo "initial deploy of ${image_tag} failed; waiting for CI"
