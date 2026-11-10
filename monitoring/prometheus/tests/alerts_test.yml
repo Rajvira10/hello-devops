@@ -1,0 +1,109 @@
+# promtool test rules monitoring/prometheus/tests/alerts_test.yml
+# Proves each alert's threshold and `for` duration behave as documented.
+rule_files:
+  - ../rules/alerts.yml
+
+evaluation_interval: 15s
+
+tests:
+  # App down: fires only after 1m of failed scrapes.
+  - interval: 15s
+    input_series:
+      - series: 'up{job="app", instance="app:8080"}'
+        values: '1 1 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 45s       # down for 15s → pending, not firing
+        alertname: AppInstanceDown
+        exp_alerts: []
+      - eval_time: 105s      # down for 75s → firing
+        alertname: AppInstanceDown
+        exp_alerts:
+          - exp_labels: { severity: critical, job: app, instance: "app:8080" }
+            exp_annotations:
+              summary: "hello-devops instance app:8080 is down"
+              description: "Prometheus has failed to scrape app:8080 for over 1 minute."
+              runbook: "docker compose ps app; docker compose logs --tail=100 app"
+
+  # 10% errors at 10 req/s → fires after 5m.
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="app", route="/", status="200"}'
+        values: '0+540x15'
+      - series: 'http_requests_total{job="app", route="/", status="500"}'
+        values: '0+60x15'
+      - series: 'http_request_errors_total{job="app", route="/"}'
+        values: '0+60x15'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: AppHighErrorRate
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: AppHighErrorRate
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: "hello-devops 5xx error rate above 5%"
+              description: "10% of requests are failing (5m window)."
+              runbook: "Open the Application dashboard; filter the logs panel by level=error."
+
+  # Same 10% error ratio but almost no traffic (1 error per 10 min) → no alert.
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="app", route="/", status="200"}'
+        values: '0+0.9x15'
+      - series: 'http_requests_total{job="app", route="/", status="500"}'
+        values: '0+0.1x15'
+      - series: 'http_request_errors_total{job="app", route="/"}'
+        values: '0+0.1x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: AppHighErrorRate
+        exp_alerts: []
+
+  # Disk 85% full → warning after 15m, but no critical.
+  - interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{mountpoint="/", device="/dev/root", fstype="ext4"}'
+        values: '15x30'
+      - series: 'node_filesystem_size_bytes{mountpoint="/", device="/dev/root", fstype="ext4"}'
+        values: '100x30'
+      - series: 'node_filesystem_readonly{mountpoint="/", device="/dev/root", fstype="ext4"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HostDiskUsageHigh
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: HostDiskUsageHigh
+        exp_alerts:
+          - exp_labels: { severity: warning, mountpoint: "/", device: "/dev/root", fstype: ext4 }
+            exp_annotations:
+              summary: "Disk / is 85% full"
+              description: "Filesystem / (/dev/root) has been above 80% for 15 minutes."
+      - eval_time: 20m
+        alertname: HostDiskUsageCritical
+        exp_alerts: []
+
+  # Container at 95% of its memory limit → fires after 5m; a container
+  # without a limit (limit=0) never fires.
+  - interval: 1m
+    input_series:
+      - series: 'container_memory_working_set_bytes{name="hello-devops-app-1"}'
+        values: '95x10'
+      - series: 'container_spec_memory_limit_bytes{name="hello-devops-app-1"}'
+        values: '100x10'
+      - series: 'container_memory_working_set_bytes{name="unlimited"}'
+        values: '95x10'
+      - series: 'container_spec_memory_limit_bytes{name="unlimited"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ContainerMemoryNearLimit
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: ContainerMemoryNearLimit
+        exp_alerts:
+          - exp_labels: { severity: warning, name: hello-devops-app-1 }
+            exp_annotations:
+              summary: "Container hello-devops-app-1 is using 95% of its memory limit"
+              description: "Working-set memory has been above 90% of the limit for 5 minutes; an OOM kill is likely."
