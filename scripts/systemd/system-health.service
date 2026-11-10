@@ -1,0 +1,35 @@
+[Unit]
+Description=System health check (CPU, memory, disk, load)
+Documentation=https://github.com/Rajvira10/hello-devops#linux-health-script
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/system_health.sh --json --quiet --log-file /var/log/system_health/health_log.txt
+# Exit 1 (warning) is an expected outcome, not a unit failure; exit 2
+# (critical) and 3 (unknown) mark the unit failed, which shows up in
+# `systemctl --failed` and node-exporter's systemd collector.
+SuccessExitStatus=1
+# Optional webhook: put HEALTH_WEBHOOK_URL=... in this root-only file.
+EnvironmentFile=-/etc/default/system-health
+
+# --- Hardening: read-only system, writable log dir only, no privileges. ---
+DynamicUser=yes
+LogsDirectory=system_health
+LogsDirectoryMode=0750
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=60
