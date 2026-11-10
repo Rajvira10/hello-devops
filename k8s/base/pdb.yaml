@@ -1,0 +1,10 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: hello-devops
+spec:
+  # Node drains / cluster upgrades must leave at least one pod serving.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hello-devops

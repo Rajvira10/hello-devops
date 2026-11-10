@@ -1,0 +1,33 @@
+# Traefik as the ingress controller on kind. Exposed as a NodePort pinned to
+# the control-plane node, which kind maps to 127.0.0.1:8088 on the host.
+deployment:
+  replicas: 1
+nodeSelector:
+  ingress-ready: "true"
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+service:
+  spec:
+    type: NodePort
+ports:
+  web:
+    nodePort: 30080
+  websecure:
+    expose:
+      default: false
+providers:
+  kubernetesIngress:
+    enabled: true
+  kubernetesCRD:
+    enabled: false
+ingressClass:
+  enabled: true
+  isDefaultClass: true
+  name: traefik
+log:
+  format: json
+accessLog:
+  enabled: true
+  format: json

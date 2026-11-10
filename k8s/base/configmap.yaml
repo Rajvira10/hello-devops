@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hello-devops-config
+data:
+  APP_ENV: kubernetes
+  LOG_LEVEL: info
+  PORT: "8080"
+  # On SIGTERM the pod fails readiness and keeps serving for this long so
+  # kube-proxy/ingress stop routing to it before connections are drained.
+  SHUTDOWN_DELAY: 5s
+  SHUTDOWN_TIMEOUT: 15s
