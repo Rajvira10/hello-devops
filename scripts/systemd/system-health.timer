@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the system health check every 5 minutes
+
+[Timer]
+OnCalendar=*:0/5
+# Run a missed check right after boot / resume.
+Persistent=true
+# Avoid every server in the fleet firing at the same second.
+RandomizedDelaySec=20
+AccuracySec=5s
+Unit=system-health.service
+
+[Install]
+WantedBy=timers.target

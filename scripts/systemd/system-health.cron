@@ -1,0 +1,5 @@
+# Alternative to the systemd timer — install as /etc/cron.d/system-health
+# Runs every 5 minutes; flock prevents overlapping runs if one ever hangs.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+*/5 * * * * root flock -n /run/system_health.lock /usr/local/bin/system_health.sh --json --quiet --log-file /var/log/system_health/health_log.txt >/dev/null 2>&1
