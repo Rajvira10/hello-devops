@@ -1,0 +1,31 @@
+# Routes alerts to Discord. The webhook URL is a secret: it is injected from
+# the DISCORD_WEBHOOK_URL env var into a tmpfs file at container start
+# (see docker-compose.yml) and never committed.
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: discord
+  group_by: [alertname, severity]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers: [severity="critical"]
+      receiver: discord
+      repeat_interval: 1h
+
+inhibit_rules:
+  # If the app is down, don't also page for its error rate / latency.
+  - source_matchers: [alertname="AppInstanceDown"]
+    target_matchers: [alertname=~"AppHighErrorRate|AppHighLatencyP95"]
+  # A critical disk alert supersedes the warning for the same mountpoint.
+  - source_matchers: [alertname="HostDiskUsageCritical"]
+    target_matchers: [alertname="HostDiskUsageHigh"]
+    equal: [mountpoint]
+
+receivers:
+  - name: discord
+    discord_configs:
+      - webhook_url_file: /run/secrets-tmp/discord_webhook_url
+        send_resolved: true

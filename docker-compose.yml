@@ -1,4 +1,4 @@
-# Local stack for the app.
+# Local stack: the app (always) + the observability stack (profile "monitoring").
 #
 #   cp .env.example .env          # sets COMPOSE_PROFILES=monitoring + Grafana creds
 #   docker compose up -d --build
@@ -38,7 +38,7 @@ services:
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:8080:8080"
-    networks: [frontend]
+    networks: [frontend, monitoring]
     read_only: true
     cap_drop: [ALL]
     stop_grace_period: 20s
@@ -53,5 +53,186 @@ services:
         limits: { cpus: "0.50", memory: 128M }
         reservations: { cpus: "0.10", memory: 32M }
 
+  # ---------------------------------------------------------- prometheus ----
+  prometheus:
+    <<: *hardening
+    profiles: [monitoring]
+    image: prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=2GB
+      - --web.enable-lifecycle
+    volumes:
+      - ./monitoring/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    networks: [monitoring]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1G }
+
+  alertmanager:
+    <<: *hardening
+    profiles: [monitoring]
+    image: prom/alertmanager:v0.35.0@sha256:e638797febd034838eca8b98cdbd46f951e9bf7f178777aa8669167406a9946c
+    # Alertmanager cannot expand env vars in its config, so the Discord
+    # webhook (a secret) is written to a tmpfs file at start-up.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        printf '%s' "$${DISCORD_WEBHOOK_URL:-http://127.0.0.1:1/discord-disabled}" > /run/secrets-tmp/discord_webhook_url
+        exec /bin/alertmanager --config.file=/etc/alertmanager/alertmanager.yml --storage.path=/alertmanager
+    environment:
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+    volumes:
+      - ./monitoring/alertmanager:/etc/alertmanager:ro
+      - alertmanager-data:/alertmanager
+    tmpfs:
+      - /run/secrets-tmp:mode=0700,uid=65534
+    networks: [monitoring]
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 128M }
+
+  # ---------------------------------------------------------------- loki ----
+  loki:
+    <<: *hardening
+    profiles: [monitoring]
+    image: grafana/loki:3.7.9@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes:
+      - ./monitoring/loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+    # No HEALTHCHECK: the Loki 3.7 image is distroless (no shell/wget).
+    # Readiness is still visible via `up{job="loki"}` in Prometheus, and
+    # Alloy/Grafana retry until Loki answers.
+    networks: [monitoring]
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512M }
+
+  # --------------------------------------------------------------- alloy ----
+  alloy:
+    <<: *hardening
+    profiles: [monitoring]
+    image: grafana/alloy:v1.21.3@sha256:8ab871206bd2d8f89277f53abffee5f452a293980788d52f85fa183a87a505a4
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+    volumes:
+      - ./monitoring/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      # Docker API for service discovery + log tailing. Read-only mount, but
+      # note the socket itself still grants full Docker API access — see README.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+    networks: [monitoring]
+    depends_on:
+      loki: { condition: service_started }
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 256M }
+
+  # ------------------------------------------------------- node-exporter ----
+  node-exporter:
+    <<: *hardening
+    profiles: [monitoring]
+    image: prom/node-exporter:v1.12.1@sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/rootfs
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run|var/lib/docker/.+|var/lib/containerd/.+)($$|/)
+      - --collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs|tmpfs)$$
+    # Host PID namespace so process/CPU stats describe the host, not the container.
+    pid: host
+    read_only: true
+    cap_drop: [ALL]
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro,rslave
+    networks: [monitoring]
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 128M }
+
+  # ------------------------------------------------------------ cadvisor ----
+  cadvisor:
+    <<: *hardening
+    profiles: [monitoring]
+    image: ghcr.io/google/cadvisor:v0.60.6@sha256:b8e7d1093144fd088f425ff003d75a4aa405de075db78dae3bc563730b1bd07a
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=15s
+      - --store_container_labels=false
+      - --whitelisted_container_labels=com.docker.compose.service,com.docker.compose.project
+      - --disable_metrics=advtcp,cpu_topology,disk,hugetlb,memory_numa,percpu,referenced_memory,resctrl,sched,tcp,udp
+    # Needed to read cgroup v2 stats and /dev/kmsg (OOM events). See README.
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    networks: [monitoring]
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 256M }
+
+  # ------------------------------------------------------------- grafana ----
+  grafana:
+    <<: *hardening
+    profiles: [monitoring]
+    image: grafana/grafana:13.2.5@sha256:9f7aa1e1e3246aade5792d35a738049f7f32f89cd51d1956cf426a4e86268a84
+    environment:
+      # Required — compose refuses to start without them (see .env.example).
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:?set GRAFANA_ADMIN_USER in .env}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/application.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:3000:3000"
+    networks: [frontend, monitoring]
+    depends_on:
+      prometheus: { condition: service_healthy }
+      loki: { condition: service_started }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 512M }
+
 networks:
+  # Published ports live here.
   frontend: {}
+  # No external connectivity and no published ports.
+  monitoring:
+    internal: true
+
+volumes:
+  prometheus-data: {}
+  alertmanager-data: {}
+  loki-data: {}
+  alloy-data: {}
+  grafana-data: {}
