@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -32,21 +33,24 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
 		os.Exit(healthcheck())
 	}
-	if err := run(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	if err := run(ctx, os.Stdout); err != nil {
 		slog.Error("server exited with error", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+// run starts the server and blocks until ctx is cancelled (SIGTERM/SIGINT in
+// production), then drains connections gracefully.
+func run(ctx context.Context, logOut io.Writer) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})).
+	logger := slog.New(slog.NewJSONHandler(logOut, &slog.HandlerOptions{Level: cfg.LogLevel})).
 		With("service", "hello-devops", "env", cfg.Environment, "version", version)
-	slog.SetDefault(logger)
 
 	srv := server.New(server.Options{
 		Version:     version,
@@ -63,9 +67,6 @@ func run() error {
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
 
 	errCh := make(chan error, 1)
 	go func() {
