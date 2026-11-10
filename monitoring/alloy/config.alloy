@@ -1,0 +1,110 @@
+// Grafana Alloy: discover every container through the Docker API, tail its
+// logs, parse them, and push to Loki.
+//
+// Label strategy (index labels — kept deliberately small):
+//   service    compose service name (≈10 values)
+//   container  container name       (≈10 values, changes only on recreate)
+//   project    compose project      (1 value)
+//   level      normalised log level (debug|info|warn|error)
+//
+// Request fields from the app's JSON logs (path, method, status) are stored
+// as *structured metadata*: filterable in LogQL ({service="app"} | path="/")
+// without creating new streams. url, duration_ms, user_agent stay in the log
+// line and are extracted at query time with `| json`.
+
+discovery.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "15s"
+}
+
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    target_label  = "project"
+  }
+  // Containers started outside compose: fall back to the container name.
+  rule {
+    source_labels = ["service", "container"]
+    regex         = ";(.+)"
+    target_label  = "service"
+  }
+}
+
+loki.source.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  targets          = discovery.relabel.containers.output
+  relabel_rules    = discovery.relabel.containers.rules
+  refresh_interval = "15s"
+  forward_to       = [loki.process.parse.receiver]
+}
+
+loki.process "parse" {
+  // --- The app emits one JSON object per line (log/slog). ---
+  stage.match {
+    selector = "{service=\"app\"}"
+
+    stage.json {
+      expressions = {
+        level  = "level",
+        msg    = "msg",
+        path   = "path",
+        method = "method",
+        status = "status",
+        ts     = "time",
+      }
+    }
+    stage.timestamp {
+      source = "ts"
+      format = "RFC3339Nano"
+    }
+    stage.structured_metadata {
+      values = {
+        path   = "",
+        method = "",
+        status = "",
+      }
+    }
+  }
+
+  // --- Prometheus, Loki, Grafana, Alloy, Alertmanager log in logfmt. ---
+  stage.match {
+    selector = "{service=~\"prometheus|loki|grafana|alloy|alertmanager|node-exporter\"}"
+
+    stage.logfmt {
+      mapping = { level = "", lvl = "" }
+    }
+    stage.template {
+      source   = "level"
+      template = "{{ if .level }}{{ .level }}{{ else }}{{ .lvl }}{{ end }}"
+    }
+  }
+
+  // Normalise level spellings (INFO/info, warning/warn, eror/err...) so the
+  // label has at most a handful of values.
+  stage.template {
+    source   = "level"
+    template = "{{ $l := ToLower .level }}{{ if or (eq $l \"warning\") (eq $l \"warn\") }}warn{{ else if or (eq $l \"err\") (eq $l \"eror\") (eq $l \"error\") (eq $l \"fatal\") (eq $l \"crit\") }}error{{ else if or (eq $l \"dbug\") (eq $l \"debug\") }}debug{{ else if or (eq $l \"info\") (eq $l \"\") }}info{{ else }}info{{ end }}"
+  }
+  stage.labels {
+    values = { level = "" }
+  }
+
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
