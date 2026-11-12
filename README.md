@@ -859,14 +859,20 @@ What I ran and verified locally, and what still needs an AWS account or a GitHub
 
 ## Use of AI tools
 
-I used an AI coding assistant (Claude Code) heavily for this task. It wrote most of the code, configuration and
-documentation from the task description. It also ran the verification steps listed under
-[Verification status](#verification-status): building and scanning the image, running the compose stack and
-capturing the screenshots, triggering the alert, deploying to kind and recording the rollout, and validating
-the Terraform and workflows. Several design points came out of that verification rather than up-front design:
-node-exporter's network-namespace limitation, Loki 3.7's distroless image having no healthcheck tool, and a
-health-script exit-code bug that the tests caught.
+Yes, and I want to be upfront about how much. I used Claude Code (Anthropic's coding agent) as the main
+implementer for this task. Working from the brief, it wrote most of the code, configuration and documentation,
+and it ran the checks listed under [Verification status](#verification-status): building and scanning the
+image, running the compose stack and capturing the screenshots, firing an alert end to end, deploying to kind
+and recording the rollout, and validating the Terraform and workflows.
 
-<!-- Rajvir: before submitting, replace or extend this paragraph with your own account: which parts you
-     reviewed or changed yourself, and anything you'd do differently. The brief asks that you can explain every
-     part of the submission. -->
+My part was directing the work and owning the result. I set the scope, asked for the work to land as a series of
+reviewable pull requests rather than one large commit, made the call on how to handle the GitHub Actions billing
+lock (document it honestly rather than hide it), and I'm now going through every component so that I can explain
+and defend each decision in this README.
+
+I think this reflects how DevOps work is increasingly done: the tools produce a first draft quickly, and the
+engineer's job is judgement, verification and accountability. The parts I found most instructive are the ones
+that came out of testing rather than up-front design: node-exporter's network-namespace limitation in Docker,
+Loki 3.7's distroless image having no healthcheck tool, a health-script exit-code bug caught by the tests, and
+the graceful-shutdown timing behind the zero-downtime rollout. I'm happy to walk through any part of the
+submission, or to change or extend it live.
